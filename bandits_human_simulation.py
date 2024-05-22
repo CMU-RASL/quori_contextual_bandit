@@ -16,6 +16,10 @@ from tf_agents.bandits.agents import lin_ucb_agent
 print('Imported lin_ucb_agent')
 import tensorflow as tf
 print('Imported tensorflow')
+from tf_agents.policies.policy_saver import PolicySaver
+print('Imported PolicySaver')
+from tf_agents.utils import common
+print('Imported common')
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -25,13 +29,11 @@ import os
 import warnings
 import pandas as pd
 import datetime
-warnings.filterwarnings("ignore") 
+warnings.filterwarnings("ignore")
+tf.get_logger().setLevel('ERROR') 
 
 #Parameters
-NUM_TRAIN_SETS = 30
-NUM_TRAIN_ITERATIONS = 10*NUM_TRAIN_SETS
 NUM_TEST_SETS = 20
-NUM_TEST_ITERATIONS = 10*NUM_TEST_SETS
 CONTEXT_SIZE = 3
 CMAP = cm.get_cmap('PiYG')
 
@@ -171,12 +173,8 @@ def one_iteration(tf_environment, agent, optimality, map, action_freq, step, pse
     action_chosen_true = map.index(action_chosen_false)
     regret = opt_reward - reward_received
 
-    # if not train and action_chosen_true == 2:
-    #   print(reward_received)
-
     if train:
       agent.train(experience)
-      #[0.8 0.6 0.5 0.4 0.3]
       if pseudo:
         match action_chosen_true:
           case 0: #very firm
@@ -361,30 +359,30 @@ def plot_performance_results(data):
 if __name__ == '__main__':
   print('Everything loaded')
   response_params_vec = [np.array([0.8, 0.6, 0.5, 0.4, 0.3])]#, np.array([0.3, 0.4, 0.5, 0.6, 0.8])]
-  fatigue_effect_vec = [np.array([4, 2, 1, -0.5, -2])] ## 
+  fatigue_effect_vec = [np.array([0, 0, 0, 0, 0])] ## np.array([4, 2, 1, -0.5, -2])
   array = [0, 1, 2, 3, 4]
   mappings = [random.sample( array, len(array) ) for ii in range(5)]
-
   #True mapping -> false map (map[action])
   #False map -> True map (map.index(action))
 
   #Want to plot overall performance
-  train_set_vec = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-  test_sets = 10
+  train_set_vec = np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 35, 40, 45, 50])
   results = pd.DataFrame(columns=['response_param', 'fatigue_effect', 'optimality', 'action_freq', 'sampling', 'train_set_num', 'reward', 'regret'])
+
+  #Remove folder
 
   for response_param in response_params_vec:
     for fatigue_effect in fatigue_effect_vec:
       for optimality in ['not_opt']:
         for action_freq in [1, 2, 3]:
           for sampling in [False, True]:
-            for pseudo in [True]:
+            for pseudo in [False]:
               print('Starting {} {} {} {} {}'.format(response_param, fatigue_effect, optimality, action_freq, pseudo))
 
-              all_rewards = np.zeros((len(mappings), len(train_set_vec), test_sets, 10))
-              all_regrets = np.zeros((len(mappings), len(train_set_vec), test_sets, 10))
-              all_actions = np.zeros((len(mappings), len(train_set_vec), test_sets, 10))
-              all_optimal_actions = np.zeros((len(mappings), len(train_set_vec), test_sets, 10))
+              all_rewards = np.zeros((len(mappings), len(train_set_vec), NUM_TEST_SETS, 10))
+              all_regrets = np.zeros((len(mappings), len(train_set_vec), NUM_TEST_SETS, 10))
+              all_actions = np.zeros((len(mappings), len(train_set_vec), NUM_TEST_SETS, 10))
+              all_optimal_actions = np.zeros((len(mappings), len(train_set_vec), NUM_TEST_SETS, 10))
 
               for map_num, map in enumerate(mappings):
                 print('\tStarting map {} out of {}'.format(map_num+1, len(mappings)))
@@ -397,26 +395,43 @@ if __name__ == '__main__':
 
                 agent = lin_ucb_agent.LinearUCBAgent(time_step_spec=time_step_spec,
                                           action_spec=action_spec, alpha=2, )
-                
+
                 step = tf_environment.reset()
-                sets_trained = 0
                 train_iteration = 0
                 train_previous_action_true = -1
-                for train_set_ind in range(len(train_set_vec)):
-                  while sets_trained < train_set_vec[train_set_ind]:
+                
+                directory = r'policies/sampling_{}/action_freq_{}/response_param_{}/fatigue_effect_{}/pseudo_{}/map_{}'.format(sampling, action_freq, response_param, fatigue_effect, pseudo, map_num)
+                if not os.path.exists(directory):
+                  os.makedirs(directory)
+                ckpt = tf.train.Checkpoint(train_set_num=tf.Variable('00'), agent=agent)
+                ckpt_manager = tf.train.CheckpointManager(ckpt, directory, max_to_keep=1000)
+
+                for train_set_num in range(np.max(train_set_vec)+1):
+                  if train_set_num > 0:
                     #10 iterations per set
                     for iter in range(10):
                       step, tf_environment, agent, reward, regret, action, opt_action = one_iteration(tf_environment, agent, optimality, map, action_freq, step, pseudo, train=True, iteration_num=train_iteration, previous_action_true=train_previous_action_true)
                       train_iteration += 1
                       train_previous_action_true = action
-                    sets_trained += 1
-                    if sets_trained % 5 == 0:
-                      print('\t\tTrained {} sets'.format(sets_trained))
 
-                  #Test for 20 sets
+                  if train_set_num in train_set_vec:
+                    var = str(train_set_num).zfill(2)
+                    ckpt.train_set_num.assign(var)
+                    save_path = ckpt_manager.save()
+                    print('\t\tSaved model for train set {}'.format(train_set_num))
+
+                for train_set_ind, train_set_num in enumerate(train_set_vec):
+                  #Load model
+                  del agent
+                  ckpt.restore(ckpt_manager.checkpoints[train_set_ind])
+                  agent = ckpt.agent
+                  #Reset the environment
+                  tf_environment = tf_py_environment.TFPyEnvironment(ExerciseEnvironment(response_param, fatigue_effect, map, sampling))
+                  step = tf_environment.reset()
+
                   test_iteration = 0
                   test_previous_action_true = -1
-                  for test_set_ind in range(test_sets):
+                  for test_set_ind in range(NUM_TEST_SETS):
                     for iter in range(10):
                       step, tf_environment, agent, reward, regret, action, opt_action = one_iteration(tf_environment, agent, optimality, map, action_freq, step, pseudo, train=False, iteration_num=test_iteration, previous_action_true=test_previous_action_true)
                       all_rewards[map_num, train_set_ind, test_set_ind, iter] = reward
@@ -425,8 +440,39 @@ if __name__ == '__main__':
                       all_optimal_actions[map_num, train_set_ind, test_set_ind, iter] = opt_action
                       test_iteration += 1
                       test_previous_action_true = action
-                    if (test_set_ind + 1) % 5 == 0:
-                      print('\t\t\tTested {} sets'.format(test_set_ind+1))
+                  print('\t\tTested for training set {}'.format(train_set_num))
+
+                  
+                # for train_set_ind in range(len(train_set_vec)):
+                #   while sets_trained < train_set_vec[train_set_ind]:
+                #     #10 iterations per set
+                #     for iter in range(10):
+                #       step, tf_environment, agent, reward, regret, action, opt_action = one_iteration(tf_environment, agent, optimality, map, action_freq, step, pseudo, train=True, iteration_num=train_iteration, previous_action_true=train_previous_action_true)
+                #       train_iteration += 1
+                #       train_previous_action_true = action
+                #     sets_trained += 1
+                #     directory = 'policies/sampling_{}/action_freq_{}/train_sets_{}/response_param_{}/fatigue_effect_{}/pseudo_{}'.format(sampling, action_freq, sets_trained, response_param, fatigue_effect, pseudo)
+                #     if not os.path.exists(directory):
+                #         os.makedirs(directory)
+                #     model_name = 'map_{}'.format(map_num)
+                #     saver.save('{}/{}'.format(directory, model_name))
+                #     if sets_trained % 5 == 0:
+                #       print('\t\tTrained {} sets'.format(sets_trained))
+
+  #                 #Test for 20 sets
+  #                 test_iteration = 0
+  #                 test_previous_action_true = -1
+  #                 for test_set_ind in range(test_sets):
+  #                   for iter in range(10):
+  #                     step, tf_environment, agent, reward, regret, action, opt_action = one_iteration(tf_environment, agent, optimality, map, action_freq, step, pseudo, train=False, iteration_num=test_iteration, previous_action_true=test_previous_action_true)
+  #                     all_rewards[map_num, train_set_ind, test_set_ind, iter] = reward
+  #                     all_regrets[map_num, train_set_ind, test_set_ind, iter] = regret
+  #                     all_actions[map_num, train_set_ind, test_set_ind, iter] = action
+  #                     all_optimal_actions[map_num, train_set_ind, test_set_ind, iter] = opt_action
+  #                     test_iteration += 1
+  #                     test_previous_action_true = action
+  #                   if (test_set_ind + 1) % 5 == 0:
+  #                     print('\t\t\tTested {} sets'.format(test_set_ind+1))
 
               saved_reward, saved_regret = process_data(all_rewards, all_regrets, all_actions, all_optimal_actions, response_param, fatigue_effect, optimality, action_freq, sampling, pseudo, train_set_vec)
 
